@@ -64,7 +64,7 @@ Mac miniでソース管理し、GitHub ActionsのWindows x64でMSVCとWindows SD
 
 ## 実装状況
 
-`v0.1.0-alpha.1`は常駐コアと静止画を実装し、Windows x64でビルド・ZIP化・Release公開済み。ミニ表示と専用アイコンは次の版で実装する。録画、録画中アイコン変更、録画終了時の確定は後続の実装対象であり、初回Releaseで動作すると表示しない。Windows実機での動作確認は未了。
+`v0.1.0-alpha.2`までに常駐コア、静止画、保存後のミニ表示、専用アイコンを実装し、Windows x64でビルド・ZIP化・Release公開済み。録画、録画中アイコン変更、録画終了時の確定は後続の実装対象。Windows実機での動作確認は未了。
 
 ## 参考
 
