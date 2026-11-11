@@ -14,6 +14,10 @@ int wmain() {
     const std::filesystem::path path = std::filesystem::temp_directory_path() / L"win-capture-recording-smoke.mp4";
     HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
     if (!stop) return 1;
+    HANDLE reserved = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                  FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (reserved == INVALID_HANDLE_VALUE) { CloseHandle(stop); return 1; }
+    CloseHandle(reserved);
     std::thread stopper([stop] {
         std::this_thread::sleep_for(std::chrono::milliseconds(800));
         SetEvent(stop);

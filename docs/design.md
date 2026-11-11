@@ -67,7 +67,7 @@ Mac miniでソース管理し、GitHub ActionsのWindows x64でMSVCとWindows SD
 
 ## 実装状況
 
-`v0.1.0-alpha.2`までに常駐コア、静止画、保存後のミニ表示、専用アイコンを実装し、Windows x64でビルド・ZIP化・Release公開済み。録画、録画中アイコン変更、録画終了時の確定は後続の実装対象。Windows実機での動作確認は未了。
+`v0.1.0-alpha.2`までに常駐コア、静止画、保存後のミニ表示、専用アイコンを実装して公開済み。録画、録画中アイコン変更、録画停止と終了時のMP4確定、Alt+Shift+5のパネルとAlt+Shift+6のメニューを実装し、Actions上で短いMP4の作成と確定を検証済み。Windows 11実機での操作・性能・映り込み確認は未了。
 
 ## 参考
 
@@ -77,3 +77,4 @@ Mac miniでソース管理し、GitHub ActionsのWindows x64でMSVCとWindows SD
 - [Microsoft: Windows Graphics Capture](https://learn.microsoft.com/en-us/windows/uwp/audio-video-camera/screen-capture)
 - [Microsoft: SetWindowDisplayAffinity](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity)
 - [Win32CaptureSample](https://github.com/robmikh/Win32CaptureSample)
+- [録画APIの要点](reference/video-apis.md)
