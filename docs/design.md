@@ -6,7 +6,7 @@
 
 Windows 11でmacOSに近いスクリーンショット・画面収録操作を提供する小型の常駐アプリ。C++20とWindows標準APIを使い、Web UI、外部ランタイム、インストーラー、管理サービスは使わない。ZIPから実行し、アプリ設定はEXEと同じ場所の必須`capture.ini`のみで管理する。日常操作をキーボードで完結できるようにする。
 
-言語の第一候補はC++20。Win32とWindowsの公式資料・サンプルに直接対応するためで、C++/WinRTはWindows Runtime APIを呼ぶために使用する。Rustと`windows` crateはMac miniから`cargo-xwin`でクロスビルドする代案。C# Native AOTも候補だが、今回は採用しない。言語間の常駐メモリ差を、計測前から決定的な理由にはしない。
+言語の第一候補はC++20。Win32とWindowsの公式資料・サンプルに直接対応するためで、C++/WinRTはWindows Runtime APIを呼ぶために使用する。Rustと`windows` crateは`cargo-xwin`を使うクロスビルドの代案。C# Native AOTも候補だが、今回は採用しない。言語間の常駐メモリ差を、計測前から決定的な理由にはしない。
 
 ## 操作仕様
 
@@ -53,7 +53,7 @@ bitrate=8000000
 - 動画: 初期実装はGDI取得、BGRAからNV12への変換、Media FoundationでH.264/MP4。取得・変換・エンコードは録画時だけ別スレッドで実行する。停止時はMP4を確定する。奇数幅・高さの選択範囲は右端・下端を1ピクセル切り詰め、H.264向けの偶数寸法にする。
 - 撮影・録画の処理は要求時だけ動かす。
 
-当初案の`Windows.Graphics.Capture`とDirect3D 11は、実機の性能・画質測定後に必要なら移行する候補とする。初期実装をGDIにするのは、Windows標準APIだけで収録を成立させ、録画中の負荷を先に測るため。N100実機で負荷と映り込みを検証する。
+当初案の`Windows.Graphics.Capture`とDirect3D 11は、実機の性能・画質測定後に必要なら移行する候補とする。初期実装をGDIにするのは、Windows標準APIだけで収録を成立させ、録画中の負荷を先に測るため。Windows 11実機で負荷と映り込みを検証する。
 
 ## Windows固有の条件
 
@@ -63,7 +63,7 @@ Per-Monitor DPI Aware V2を使用し、負の座標を含む複数モニター�
 
 ## 開発・配布
 
-Mac miniでソース管理し、GitHub ActionsのWindows x64でMSVCとWindows SDKを使ってビルドする。`/MT`でC++ランタイムを静的リンクし、ZIPをReleaseから配布する。Windows 11 / Intel N100でDPI、UI、画質、動画性能を確認する。
+ソースをGitで管理し、GitHub ActionsのWindows x64でMSVCとWindows SDKを使ってビルドする。`/MT`でC++ランタイムを静的リンクし、ZIPをReleaseから配布する。Windows 11実機でDPI、UI、画質、動画性能を確認する。
 
 ## 実装状況
 
