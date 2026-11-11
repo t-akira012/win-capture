@@ -6,6 +6,8 @@
 
 Windows 11でmacOSに近いスクリーンショット・画面収録操作を提供する小型の常駐アプリ。C++20とWindows標準APIを使い、Web UI、外部ランタイム、インストーラー、管理サービスは使わない。ZIPから実行し、アプリ設定はEXEと同じ場所の必須`capture.ini`のみで管理する。日常操作をキーボードで完結できるようにする。
 
+言語の第一候補はC++20。Win32とWindowsの公式資料・サンプルに直接対応するためで、C++/WinRTはWindows Runtime APIを呼ぶために使用する。Rustと`windows` crateはMac miniから`cargo-xwin`でクロスビルドする代案。C# Native AOTも候補だが、今回は採用しない。言語間の常駐メモリ差を、計測前から決定的な理由にはしない。
+
 ## 操作仕様
 
 | 操作 | 動作 | 状態 |
@@ -22,7 +24,7 @@ Windows 11でmacOSに近いスクリーンショット・画面収録操作を�
 
 INIがない初回起動時だけ生成する。以後はINIを正本とし、欠落・不正な値を黙って補完しない。`%USERPROFILE%`などの環境変数を展開し、保存先を作成する。画像はPNG/JPEG、動画はH.264/MP4。JPEG品質は1～100のINI値をWICの0.0～1.0へ変換する。
 
-初期INI案（数値は実装時の初期提案であり、ユーザー指定値ではない）:
+初期INI（数値は初期実装が採用した値であり、ユーザー指定値ではない）:
 
 ```ini
 [General]
@@ -38,7 +40,7 @@ fps=30
 bitrate=8000000
 ```
 
-月は`{MM}`、分は`{mm}`で区別する。同じ秒に同名ファイルがあれば拡張子の前に`-1`、`-2`と連番を付け、上書きしない。拡張子は出力形式から決める。初期INIの具体値とテンプレート記法は実装時に確定する。
+月は`{MM}`、分は`{mm}`で区別する。同じ秒に同名ファイルがあれば拡張子の前に`-1`、`-2`と連番を付け、上書きしない。拡張子は出力形式から決める。初期値とトークン記法は初期実装で採用済みであり、今後の変更はこの文書と実装を同時に更新する。
 
 ## 内部構成
 
@@ -51,17 +53,21 @@ bitrate=8000000
 
 Per-Monitor DPI Aware V2を使用し、負の座標を含む複数モニターを扱う。ホットキー競合は検出して通知する。`TaskbarCreated`時にトレイアイコンを再登録する。多重起動は名前付きMutexで防ぐ。UIの映り込みを防ぎ、録画操作UIにはキャプチャ除外属性を検討する。HDRの色変換・トーンマッピングは検証対象。Alt+Shiftが入力言語切替と競合する環境もある。
 
+録画UIのキャプチャ除外には`SetWindowDisplayAffinity(WDA_EXCLUDEFROMCAPTURE)`が候補。`Windows.Graphics.Capture`の録画対象枠を非表示にするにはWindows側の許可要件があるため、初期実装で無条件に非表示を約束しない。
+
 ## 開発・配布
 
 Mac miniでソース管理し、GitHub ActionsのWindows x64でMSVCとWindows SDKを使ってビルドする。`/MT`でC++ランタイムを静的リンクし、ZIPをReleaseから配布する。Windows 11 / Intel N100でDPI、UI、画質、動画性能を確認する。
 
 ## 実装状況
 
-初回Releaseでは常駐コアと静止画を実装する。録画、録画中アイコン変更、録画終了時の確定は後続の実装対象であり、初回Releaseで動作すると表示しない。Windows実機での動作確認は未了。
+`v0.1.0-alpha.1`は常駐コアと静止画を実装し、Windows x64でビルド・ZIP化・Release公開済み。録画、録画中アイコン変更、録画終了時の確定は後続の実装対象であり、初回Releaseで動作すると表示しない。Windows実機での動作確認は未了。
 
 ## 参考
 
 - [Microsoft: RegisterHotKey](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerhotkey)
 - [Microsoft: WIC bitmap encoder](https://learn.microsoft.com/en-us/windows/desktop/wic/-wic-imp-iwicbitmapencoder)
 - [Microsoft: Media Foundation sink writer](https://learn.microsoft.com/en-us/windows/win32/medfound/using-the-sink-writer)
+- [Microsoft: Windows Graphics Capture](https://learn.microsoft.com/en-us/windows/uwp/audio-video-camera/screen-capture)
+- [Microsoft: SetWindowDisplayAffinity](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-setwindowdisplayaffinity)
 - [Win32CaptureSample](https://github.com/robmikh/Win32CaptureSample)
