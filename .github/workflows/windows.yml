@@ -1,0 +1,45 @@
+name: Windows build and release
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Release tag (leave empty for build only)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: cmake -S . -B build -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
+      - name: Build
+        run: cmake --build build --config Release --parallel
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package/Capture | Out-Null
+          Copy-Item build/Release/capture.exe package/Capture/capture.exe
+          Copy-Item README.md package/Capture/README.md
+          Compress-Archive -Path package/Capture -DestinationPath win-capture-windows-x64.zip -Force
+          Get-FileHash win-capture-windows-x64.zip -Algorithm SHA256
+      - uses: actions/upload-artifact@v4
+        with:
+          name: win-capture-windows-x64
+          path: win-capture-windows-x64.zip
+          if-no-files-found: error
+      - name: Publish prerelease
+        if: github.event_name == 'workflow_dispatch' && inputs.release_tag != ''
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          gh release create $env:RELEASE_TAG win-capture-windows-x64.zip --target $env:GITHUB_SHA --title $env:RELEASE_TAG --notes "Initial Windows build: still image capture. Video recording is not implemented yet." --prerelease
