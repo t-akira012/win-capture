@@ -4,6 +4,7 @@
 #include <dwmapi.h>
 #include <wincodec.h>
 #include <wrl/client.h>
+#include "recording.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -13,6 +14,7 @@
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <thread>
 #include <utility>
 
 using Microsoft::WRL::ComPtr;
@@ -20,17 +22,26 @@ using Microsoft::WRL::ComPtr;
 namespace {
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kCaptureSelection = WM_APP + 2;
+constexpr UINT kRecordingComplete = WM_APP + 3;
 constexpr UINT kTrayId = 1;
 constexpr UINT_PTR kPreviewTimer = 1;
 constexpr int kIconId = 1;
+constexpr int kRecordingIconId = 2;
 constexpr int kHotkeyMonitor = 3;
 constexpr int kHotkeySelection = 4;
 constexpr int kHotkeyPanel = 5;
+constexpr int kHotkeyMenu = 6;
 constexpr UINT kMenuMonitor = 101;
 constexpr UINT kMenuSelection = 102;
 constexpr UINT kMenuRecordMonitor = 103;
 constexpr UINT kMenuRecordSelection = 104;
 constexpr UINT kMenuExit = 105;
+constexpr UINT kMenuStop = 106;
+constexpr UINT kPanelMonitor = 201;
+constexpr UINT kPanelSelection = 202;
+constexpr UINT kPanelRecordMonitor = 203;
+constexpr UINT kPanelRecordSelection = 204;
+constexpr UINT kPanelStop = 205;
 
 struct Config {
     std::wstring save_dir;
@@ -45,6 +56,7 @@ Config g_config;
 HINSTANCE g_instance = nullptr;
 HWND g_main = nullptr;
 HWND g_overlay = nullptr;
+HWND g_panel = nullptr;
 HWND g_preview = nullptr;
 HBITMAP g_preview_bitmap = nullptr;
 int g_preview_width = 0;
@@ -55,6 +67,14 @@ RECT g_selected = {};
 POINT g_drag_start = {};
 POINT g_drag_end = {};
 bool g_dragging = false;
+bool g_selection_record = false;
+bool g_recording = false;
+bool g_record_stopping = false;
+bool g_exit_after_recording = false;
+HANDLE g_record_stop = nullptr;
+std::thread g_record_thread;
+HRESULT g_record_result = E_FAIL;
+std::wstring g_record_path;
 
 void Error(const std::wstring& message) {
     MessageBoxW(g_main, message.c_str(), L"Win Capture", MB_OK | MB_ICONERROR);
@@ -212,9 +232,8 @@ std::wstring OutputName() {
     return name;
 }
 
-std::wstring ReserveOutput(std::wstring& error) {
+std::wstring ReserveOutput(const std::wstring& extension, std::wstring& error) {
     const std::wstring base = OutputName();
-    const std::wstring extension = g_config.format == L"png" ? L".png" : L".jpg";
     for (int suffix = 0; suffix < 10000; ++suffix) {
         const std::wstring filename = base + (suffix ? std::format(L"-{}", suffix) : L"") + extension;
         const std::wstring path = (std::filesystem::path(g_config.save_dir) / filename).wstring();
@@ -404,12 +423,13 @@ void CaptureRect(RECT rect) {
         return;
     }
     std::wstring error;
-    const std::wstring path = ReserveOutput(error);
+    const std::wstring path = ReserveOutput(g_config.format == L"png" ? L".png" : L".jpg", error);
     if (!path.empty()) {
-        if (SaveBitmap(bitmap, static_cast<UINT>(width), static_cast<UINT>(height), path, error))
-            ShowPreview(bitmap, rect, path);
-        else
+        if (SaveBitmap(bitmap, static_cast<UINT>(width), static_cast<UINT>(height), path, error)) {
+            if (!g_recording) ShowPreview(bitmap, rect, path);
+        } else {
             DeleteFileW(path.c_str());
+        }
     }
     DeleteObject(bitmap);
     if (!error.empty()) Error(error);
@@ -422,6 +442,67 @@ void CaptureCursorMonitor() {
     MONITORINFO info{sizeof(info)};
     if (!GetMonitorInfoW(monitor, &info)) { Error(L"モニター情報を取得できません。"); return; }
     CaptureRect(info.rcMonitor);
+}
+
+void UpdateTrayIcon();
+void UpdatePanelButtons();
+
+void StartRecording(RECT area) {
+    if (g_recording) return;
+    area.right = area.left + ((area.right - area.left) & ~1);
+    area.bottom = area.top + ((area.bottom - area.top) & ~1);
+    if (area.right - area.left < 2 || area.bottom - area.top < 2) {
+        Error(L"録画範囲は幅・高さとも2ピクセル以上にしてください。");
+        return;
+    }
+    HidePreview();
+    if (g_panel) ShowWindow(g_panel, SW_HIDE);
+    DwmFlush();
+    std::wstring error;
+    const std::wstring path = ReserveOutput(L".mp4", error);
+    if (path.empty()) { Error(error); return; }
+    HANDLE stop = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+    if (!stop) {
+        DeleteFileW(path.c_str());
+        Error(L"録画停止イベントを作成できません。");
+        return;
+    }
+    g_record_stop = stop;
+    g_record_path = path;
+    g_recording = true;
+    g_record_stopping = false;
+    try {
+        g_record_thread = std::thread([area, path, stop] {
+            g_record_result = RecordScreen(area, path, g_config.fps, g_config.bitrate, stop);
+            PostMessageW(g_main, kRecordingComplete, 0, 0);
+        });
+    } catch (...) {
+        g_recording = false;
+        g_record_stop = nullptr;
+        CloseHandle(stop);
+        DeleteFileW(path.c_str());
+        g_record_path.clear();
+        Error(L"録画スレッドを開始できません。");
+        return;
+    }
+    UpdateTrayIcon();
+    UpdatePanelButtons();
+}
+
+void RecordCursorMonitor() {
+    POINT cursor{};
+    if (!GetCursorPos(&cursor)) { Error(L"カーソル位置を取得できません。"); return; }
+    const HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(monitor, &info)) { Error(L"モニター情報を取得できません。"); return; }
+    StartRecording(info.rcMonitor);
+}
+
+void StopRecording() {
+    if (!g_recording || g_record_stopping) return;
+    g_record_stopping = true;
+    SetEvent(g_record_stop);
+    UpdatePanelButtons();
 }
 
 LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
@@ -487,9 +568,10 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
     return DefWindowProcW(hwnd, message, wparam, lparam);
 }
 
-void StartSelection() {
+void StartSelection(bool record = false) {
     HidePreview();
     if (g_overlay) { SetForegroundWindow(g_overlay); return; }
+    g_selection_record = record;
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
     const int width = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -511,9 +593,33 @@ void AddTrayIcon() {
     icon.uID = kTrayId;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     icon.uCallbackMessage = kTrayMessage;
-    icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(kIconId));
-    wcscpy_s(icon.szTip, L"Win Capture");
+    icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(g_recording ? kRecordingIconId : kIconId));
+    wcscpy_s(icon.szTip, g_recording ? L"Win Capture - 録画中" : L"Win Capture");
     if (!Shell_NotifyIconW(NIM_ADD, &icon)) Error(L"タスクトレイアイコンを登録できません。");
+}
+
+void UpdateTrayIcon() {
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = g_main;
+    icon.uID = kTrayId;
+    icon.uFlags = NIF_ICON | NIF_TIP;
+    icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(g_recording ? kRecordingIconId : kIconId));
+    wcscpy_s(icon.szTip, g_recording ? L"Win Capture - 録画中" : L"Win Capture");
+    Shell_NotifyIconW(NIM_MODIFY, &icon);
+}
+
+void NotifyVideoSaved(const std::wstring& path) {
+    NOTIFYICONDATAW icon{};
+    icon.cbSize = sizeof(icon);
+    icon.hWnd = g_main;
+    icon.uID = kTrayId;
+    icon.uFlags = NIF_INFO;
+    wcscpy_s(icon.szInfoTitle, L"録画を保存しました");
+    const std::wstring filename = std::filesystem::path(path).filename().wstring();
+    wcsncpy_s(icon.szInfo, filename.c_str(), _TRUNCATE);
+    icon.dwInfoFlags = NIIF_INFO;
+    Shell_NotifyIconW(NIM_MODIFY, &icon);
 }
 
 void RemoveTrayIcon() {
@@ -524,14 +630,82 @@ void RemoveTrayIcon() {
     Shell_NotifyIconW(NIM_DELETE, &icon);
 }
 
-void ShowPanel() {
+LRESULT CALLBACK PanelProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_CREATE:
+        CreateWindowW(L"BUTTON", L"モニターを撮影", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      12, 12, 212, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelMonitor)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"範囲を撮影", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      232, 12, 212, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelSelection)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"モニターを録画", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      12, 56, 212, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelRecordMonitor)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"範囲を録画", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      232, 56, 212, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelRecordSelection)), g_instance, nullptr);
+        CreateWindowW(L"BUTTON", L"録画を停止して保存", WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                      12, 100, 432, 36, hwnd, reinterpret_cast<HMENU>(static_cast<INT_PTR>(kPanelStop)), g_instance, nullptr);
+        return 0;
+    case WM_COMMAND:
+        switch (LOWORD(wparam)) {
+        case kPanelMonitor: ShowWindow(hwnd, SW_HIDE); CaptureCursorMonitor(); return 0;
+        case kPanelSelection: ShowWindow(hwnd, SW_HIDE); StartSelection(); return 0;
+        case kPanelRecordMonitor: ShowWindow(hwnd, SW_HIDE); RecordCursorMonitor(); return 0;
+        case kPanelRecordSelection: ShowWindow(hwnd, SW_HIDE); StartSelection(true); return 0;
+        case kPanelStop: ShowWindow(hwnd, SW_HIDE); StopRecording(); return 0;
+        case IDCANCEL: ShowWindow(hwnd, SW_HIDE); return 0;
+        }
+        break;
+    case WM_CLOSE:
+        ShowWindow(hwnd, SW_HIDE);
+        return 0;
+    case WM_DESTROY:
+        g_panel = nullptr;
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+void UpdatePanelButtons() {
+    if (!g_panel) return;
+    for (UINT id : {kPanelMonitor, kPanelSelection, kPanelRecordMonitor, kPanelRecordSelection})
+        EnableWindow(GetDlgItem(g_panel, id), !g_recording);
+    EnableWindow(GetDlgItem(g_panel, kPanelStop), g_recording && !g_record_stopping);
+}
+
+void ShowCapturePanel() {
+    if (g_panel && IsWindowVisible(g_panel)) { ShowWindow(g_panel, SW_HIDE); return; }
+    POINT cursor{};
+    GetCursorPos(&cursor);
+    MONITORINFO info{sizeof(info)};
+    const HMONITOR monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
+    if (!GetMonitorInfoW(monitor, &info)) return;
+    constexpr int width = 466;
+    constexpr int height = 190;
+    const int x = info.rcWork.left + (info.rcWork.right - info.rcWork.left - width) / 2;
+    const int y = info.rcWork.bottom - height - 24;
+    if (!g_panel) {
+        g_panel = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                                   L"WinCapturePanel", L"Win Capture", WS_POPUP | WS_CAPTION | WS_SYSMENU,
+                                   x, y, width, height, nullptr, nullptr, g_instance, nullptr);
+        if (!g_panel) { Error(L"操作パネルを表示できません。"); return; }
+        SetWindowDisplayAffinity(g_panel, WDA_EXCLUDEFROMCAPTURE);
+    } else {
+        SetWindowPos(g_panel, HWND_TOPMOST, x, y, width, height, SWP_NOACTIVATE);
+    }
+    UpdatePanelButtons();
+    ShowWindow(g_panel, SW_SHOW);
+    SetForegroundWindow(g_panel);
+    SetFocus(GetDlgItem(g_panel, g_recording ? kPanelStop : kPanelMonitor));
+}
+
+void ShowOperationMenu() {
     HMENU menu = CreatePopupMenu();
     if (!menu) return;
     AppendMenuW(menu, MF_STRING, kMenuMonitor, L"モニターを撮影");
     AppendMenuW(menu, MF_STRING, kMenuSelection, L"範囲を撮影");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, kMenuRecordMonitor, L"モニターを録画（未実装）");
-    AppendMenuW(menu, MF_STRING | MF_GRAYED, kMenuRecordSelection, L"範囲を録画（未実装）");
+    AppendMenuW(menu, MF_STRING | (g_recording ? MF_GRAYED : 0), kMenuRecordMonitor, L"モニターを録画");
+    AppendMenuW(menu, MF_STRING | (g_recording ? MF_GRAYED : 0), kMenuRecordSelection, L"範囲を録画");
+    if (g_recording) AppendMenuW(menu, MF_STRING | (g_record_stopping ? MF_GRAYED : 0), kMenuStop, L"録画を停止して保存");
     AppendMenuW(menu, MF_SEPARATOR, 0, nullptr);
     AppendMenuW(menu, MF_STRING, kMenuExit, L"終了");
     POINT cursor{};
@@ -548,28 +722,62 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
     case WM_HOTKEY:
         if (wparam == kHotkeyMonitor) CaptureCursorMonitor();
         else if (wparam == kHotkeySelection) StartSelection();
-        else if (wparam == kHotkeyPanel) ShowPanel();
+        else if (wparam == kHotkeyPanel) ShowCapturePanel();
+        else if (wparam == kHotkeyMenu) ShowOperationMenu();
         return 0;
     case kCaptureSelection:
         DwmFlush();
-        CaptureRect(g_selected);
+        if (g_selection_record) StartRecording(g_selected);
+        else CaptureRect(g_selected);
         return 0;
+    case kRecordingComplete: {
+        if (g_record_thread.joinable()) g_record_thread.join();
+        if (g_record_stop) CloseHandle(g_record_stop);
+        g_record_stop = nullptr;
+        g_recording = false;
+        g_record_stopping = false;
+        UpdateTrayIcon();
+        UpdatePanelButtons();
+        if (FAILED(g_record_result)) {
+            DeleteFileW(g_record_path.c_str());
+            Error(std::format(L"録画を保存できませんでした (0x{:08X})。", static_cast<unsigned>(g_record_result)));
+        } else {
+            NotifyVideoSaved(g_record_path);
+        }
+        g_record_path.clear();
+        if (g_exit_after_recording) DestroyWindow(hwnd);
+        return 0;
+    }
     case kTrayMessage:
-        if (lparam == WM_RBUTTONUP || lparam == WM_LBUTTONDBLCLK) ShowPanel();
+        if (lparam == WM_LBUTTONDBLCLK && g_recording) StopRecording();
+        else if (lparam == WM_RBUTTONUP || lparam == WM_LBUTTONDBLCLK) ShowOperationMenu();
         return 0;
     case WM_COMMAND:
         switch (LOWORD(wparam)) {
         case kMenuMonitor: CaptureCursorMonitor(); break;
         case kMenuSelection: StartSelection(); break;
-        case kMenuExit: DestroyWindow(hwnd); break;
+        case kMenuRecordMonitor: RecordCursorMonitor(); break;
+        case kMenuRecordSelection: StartSelection(true); break;
+        case kMenuStop: StopRecording(); break;
+        case kMenuExit: PostMessageW(hwnd, WM_CLOSE, 0, 0); break;
+        }
+        return 0;
+    case WM_CLOSE:
+        if (g_recording) {
+            g_exit_after_recording = true;
+            StopRecording();
+        } else {
+            DestroyWindow(hwnd);
         }
         return 0;
     case WM_DESTROY:
         HidePreview();
+        if (g_panel) DestroyWindow(g_panel);
         if (g_overlay) DestroyWindow(g_overlay);
         UnregisterHotKey(hwnd, kHotkeyMonitor);
         UnregisterHotKey(hwnd, kHotkeySelection);
         UnregisterHotKey(hwnd, kHotkeyPanel);
+        UnregisterHotKey(hwnd, kHotkeyMenu);
         RemoveTrayIcon();
         PostQuitMessage(0);
         return 0;
@@ -606,17 +814,25 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     main_class.hInstance = instance;
     main_class.lpfnWndProc = MainProc;
     main_class.lpszClassName = L"WinCaptureMain";
+    main_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(kIconId));
     WNDCLASSEXW overlay_class{sizeof(WNDCLASSEXW)};
     overlay_class.hInstance = instance;
     overlay_class.lpfnWndProc = OverlayProc;
     overlay_class.lpszClassName = L"WinCaptureOverlay";
     overlay_class.hCursor = LoadCursorW(nullptr, IDC_CROSS);
+    WNDCLASSEXW panel_class{sizeof(WNDCLASSEXW)};
+    panel_class.hInstance = instance;
+    panel_class.lpfnWndProc = PanelProc;
+    panel_class.lpszClassName = L"WinCapturePanel";
+    panel_class.hIcon = LoadIconW(instance, MAKEINTRESOURCEW(kIconId));
+    panel_class.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_BTNFACE + 1);
     WNDCLASSEXW preview_class{sizeof(WNDCLASSEXW)};
     preview_class.hInstance = instance;
     preview_class.lpfnWndProc = PreviewProc;
     preview_class.lpszClassName = L"WinCapturePreview";
     preview_class.style = CS_DROPSHADOW;
     if (!RegisterClassExW(&main_class) || !RegisterClassExW(&overlay_class) ||
+        !RegisterClassExW(&panel_class) ||
         !RegisterClassExW(&preview_class)) {
         Error(L"ウィンドウクラスを登録できません。");
         CoUninitialize();
@@ -639,12 +855,19 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     std::wstring failed;
     for (const auto [id, key] : {std::pair{kHotkeyMonitor, '3'},
                                   std::pair{kHotkeySelection, '4'},
-                                  std::pair{kHotkeyPanel, '5'}}) {
+                                  std::pair{kHotkeyPanel, '5'},
+                                  std::pair{kHotkeyMenu, '6'}}) {
         if (!RegisterHotKey(g_main, id, modifiers, key)) failed += std::format(L"Alt+Shift+{} ", id);
     }
     if (!failed.empty()) Error(L"ホットキーを登録できません: " + failed + L"\n他のアプリや入力言語設定との競合を確認してください。");
     MSG message{};
     while (GetMessageW(&message, nullptr, 0, 0) > 0) {
+        if (g_panel && IsWindowVisible(g_panel) && message.message == WM_KEYDOWN &&
+            message.wParam == VK_ESCAPE && (message.hwnd == g_panel || IsChild(g_panel, message.hwnd))) {
+            ShowWindow(g_panel, SW_HIDE);
+            continue;
+        }
+        if (g_panel && IsWindowVisible(g_panel) && IsDialogMessageW(g_panel, &message)) continue;
         TranslateMessage(&message);
         DispatchMessageW(&message);
     }
