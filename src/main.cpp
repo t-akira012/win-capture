@@ -6,6 +6,7 @@
 #include <wrl/client.h>
 
 #include <algorithm>
+#include <cmath>
 #include <filesystem>
 #include <format>
 #include <iterator>
@@ -20,6 +21,8 @@ namespace {
 constexpr UINT kTrayMessage = WM_APP + 1;
 constexpr UINT kCaptureSelection = WM_APP + 2;
 constexpr UINT kTrayId = 1;
+constexpr UINT_PTR kPreviewTimer = 1;
+constexpr int kIconId = 1;
 constexpr int kHotkeyMonitor = 3;
 constexpr int kHotkeySelection = 4;
 constexpr int kHotkeyPanel = 5;
@@ -42,6 +45,11 @@ Config g_config;
 HINSTANCE g_instance = nullptr;
 HWND g_main = nullptr;
 HWND g_overlay = nullptr;
+HWND g_preview = nullptr;
+HBITMAP g_preview_bitmap = nullptr;
+int g_preview_width = 0;
+int g_preview_height = 0;
+std::wstring g_preview_path;
 UINT g_taskbar_created = 0;
 RECT g_selected = {};
 POINT g_drag_start = {};
@@ -264,7 +272,119 @@ bool SaveBitmap(HBITMAP bitmap, UINT width, UINT height, const std::wstring& pat
     return true;
 }
 
+void HidePreview() {
+    if (g_preview) DestroyWindow(g_preview);
+}
+
+LRESULT CALLBACK PreviewProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam) {
+    switch (message) {
+    case WM_MOUSEACTIVATE:
+        return MA_NOACTIVATE;
+    case WM_SETCURSOR:
+        SetCursor(LoadCursorW(nullptr, IDC_HAND));
+        return TRUE;
+    case WM_LBUTTONUP: {
+        const std::wstring path = g_preview_path;
+        HidePreview();
+        const HINSTANCE result = ShellExecuteW(nullptr, L"open", path.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+        if (reinterpret_cast<INT_PTR>(result) <= 32) Error(L"保存した画像を開けませんでした。");
+        return 0;
+    }
+    case WM_TIMER:
+        if (wparam == kPreviewTimer) { HidePreview(); return 0; }
+        break;
+    case WM_PAINT: {
+        PAINTSTRUCT paint{};
+        HDC dc = BeginPaint(hwnd, &paint);
+        RECT client{};
+        GetClientRect(hwnd, &client);
+        FillRect(dc, &client, static_cast<HBRUSH>(GetStockObject(WHITE_BRUSH)));
+        HDC image_dc = CreateCompatibleDC(dc);
+        if (image_dc && g_preview_bitmap) {
+            HGDIOBJ old = SelectObject(image_dc, g_preview_bitmap);
+            BitBlt(dc, 6, 6, g_preview_width, g_preview_height, image_dc, 0, 0, SRCCOPY);
+            SelectObject(image_dc, old);
+        }
+        if (image_dc) DeleteDC(image_dc);
+        FrameRect(dc, &client, static_cast<HBRUSH>(GetStockObject(DKGRAY_BRUSH)));
+        EndPaint(hwnd, &paint);
+        return 0;
+    }
+    case WM_DESTROY:
+        KillTimer(hwnd, kPreviewTimer);
+        if (g_preview_bitmap) DeleteObject(g_preview_bitmap);
+        g_preview_bitmap = nullptr;
+        g_preview = nullptr;
+        g_preview_path.clear();
+        return 0;
+    }
+    return DefWindowProcW(hwnd, message, wparam, lparam);
+}
+
+HBITMAP MakeThumbnail(HBITMAP source, int source_width, int source_height, int width, int height) {
+    HDC screen = GetDC(nullptr);
+    if (!screen) return nullptr;
+    HDC input = CreateCompatibleDC(screen);
+    HDC output = CreateCompatibleDC(screen);
+    HBITMAP thumbnail = input && output ? CreateCompatibleBitmap(screen, width, height) : nullptr;
+    if (thumbnail) {
+        HGDIOBJ old_input = SelectObject(input, source);
+        HGDIOBJ old_output = SelectObject(output, thumbnail);
+        SetStretchBltMode(output, HALFTONE);
+        SetBrushOrgEx(output, 0, 0, nullptr);
+        const bool ok = StretchBlt(output, 0, 0, width, height, input, 0, 0,
+                                   source_width, source_height, SRCCOPY) != 0;
+        SelectObject(output, old_output);
+        SelectObject(input, old_input);
+        if (!ok) { DeleteObject(thumbnail); thumbnail = nullptr; }
+    }
+    if (output) DeleteDC(output);
+    if (input) DeleteDC(input);
+    ReleaseDC(nullptr, screen);
+    return thumbnail;
+}
+
+void ShowPreview(HBITMAP bitmap, RECT captured, const std::wstring& path) {
+    HidePreview();
+    const int source_width = captured.right - captured.left;
+    const int source_height = captured.bottom - captured.top;
+    const double scale = std::min({1.0, 240.0 / source_width, 135.0 / source_height});
+    g_preview_width = std::max(1, static_cast<int>(std::lround(source_width * scale)));
+    g_preview_height = std::max(1, static_cast<int>(std::lround(source_height * scale)));
+    g_preview_bitmap = MakeThumbnail(bitmap, source_width, source_height,
+                                     g_preview_width, g_preview_height);
+    if (!g_preview_bitmap) return;
+    const POINT center{captured.left + source_width / 2, captured.top + source_height / 2};
+    const HMONITOR monitor = MonitorFromPoint(center, MONITOR_DEFAULTTONEAREST);
+    MONITORINFO info{sizeof(info)};
+    if (!GetMonitorInfoW(monitor, &info)) {
+        DeleteObject(g_preview_bitmap);
+        g_preview_bitmap = nullptr;
+        return;
+    }
+    const int window_width = g_preview_width + 12;
+    const int window_height = g_preview_height + 12;
+    const int x = info.rcWork.right - window_width - 16;
+    const int y = info.rcWork.bottom - window_height - 16;
+    g_preview_path = path;
+    g_preview = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                                L"WinCapturePreview", L"Saved capture", WS_POPUP,
+                                x, y, window_width, window_height,
+                                nullptr, nullptr, g_instance, nullptr);
+    if (!g_preview) {
+        DeleteObject(g_preview_bitmap);
+        g_preview_bitmap = nullptr;
+        g_preview_path.clear();
+        return;
+    }
+    SetWindowDisplayAffinity(g_preview, WDA_EXCLUDEFROMCAPTURE);
+    ShowWindow(g_preview, SW_SHOWNOACTIVATE);
+    SetTimer(g_preview, kPreviewTimer, 5000, nullptr);
+}
+
 void CaptureRect(RECT rect) {
+    HidePreview();
+    DwmFlush();
     const int width = rect.right - rect.left;
     const int height = rect.bottom - rect.top;
     if (width <= 0 || height <= 0) return;
@@ -285,8 +405,12 @@ void CaptureRect(RECT rect) {
     }
     std::wstring error;
     const std::wstring path = ReserveOutput(error);
-    if (!path.empty() && !SaveBitmap(bitmap, static_cast<UINT>(width), static_cast<UINT>(height), path, error))
-        DeleteFileW(path.c_str());
+    if (!path.empty()) {
+        if (SaveBitmap(bitmap, static_cast<UINT>(width), static_cast<UINT>(height), path, error))
+            ShowPreview(bitmap, rect, path);
+        else
+            DeleteFileW(path.c_str());
+    }
     DeleteObject(bitmap);
     if (!error.empty()) Error(error);
 }
@@ -364,6 +488,7 @@ LRESULT CALLBACK OverlayProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lpar
 }
 
 void StartSelection() {
+    HidePreview();
     if (g_overlay) { SetForegroundWindow(g_overlay); return; }
     const int x = GetSystemMetrics(SM_XVIRTUALSCREEN);
     const int y = GetSystemMetrics(SM_YVIRTUALSCREEN);
@@ -386,7 +511,7 @@ void AddTrayIcon() {
     icon.uID = kTrayId;
     icon.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
     icon.uCallbackMessage = kTrayMessage;
-    icon.hIcon = LoadIconW(nullptr, IDI_APPLICATION);
+    icon.hIcon = LoadIconW(g_instance, MAKEINTRESOURCEW(kIconId));
     wcscpy_s(icon.szTip, L"Win Capture");
     if (!Shell_NotifyIconW(NIM_ADD, &icon)) Error(L"タスクトレイアイコンを登録できません。");
 }
@@ -440,6 +565,7 @@ LRESULT CALLBACK MainProc(HWND hwnd, UINT message, WPARAM wparam, LPARAM lparam)
         }
         return 0;
     case WM_DESTROY:
+        HidePreview();
         if (g_overlay) DestroyWindow(g_overlay);
         UnregisterHotKey(hwnd, kHotkeyMonitor);
         UnregisterHotKey(hwnd, kHotkeySelection);
@@ -485,7 +611,13 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     overlay_class.lpfnWndProc = OverlayProc;
     overlay_class.lpszClassName = L"WinCaptureOverlay";
     overlay_class.hCursor = LoadCursorW(nullptr, IDC_CROSS);
-    if (!RegisterClassExW(&main_class) || !RegisterClassExW(&overlay_class)) {
+    WNDCLASSEXW preview_class{sizeof(WNDCLASSEXW)};
+    preview_class.hInstance = instance;
+    preview_class.lpfnWndProc = PreviewProc;
+    preview_class.lpszClassName = L"WinCapturePreview";
+    preview_class.style = CS_DROPSHADOW;
+    if (!RegisterClassExW(&main_class) || !RegisterClassExW(&overlay_class) ||
+        !RegisterClassExW(&preview_class)) {
         Error(L"ウィンドウクラスを登録できません。");
         CoUninitialize();
         ReleaseMutex(mutex);

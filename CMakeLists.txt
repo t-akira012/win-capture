@@ -1,7 +1,8 @@
 cmake_minimum_required(VERSION 3.21)
-project(win_capture LANGUAGES CXX)
+project(win_capture LANGUAGES CXX RC)
 
-add_executable(capture WIN32 src/main.cpp)
+add_executable(capture WIN32 src/main.cpp src/app.rc)
+target_include_directories(capture PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/assets)
 target_compile_features(capture PRIVATE cxx_std_20)
 target_compile_definitions(capture PRIVATE UNICODE _UNICODE WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(capture PRIVATE user32 gdi32 shell32 ole32 windowscodecs dwmapi)

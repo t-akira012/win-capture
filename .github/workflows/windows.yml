@@ -42,4 +42,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
-          gh release create $env:RELEASE_TAG win-capture-windows-x64.zip --target $env:GITHUB_SHA --title $env:RELEASE_TAG --notes "Initial Windows build: still image capture. Video recording is not implemented yet." --prerelease
+          gh release create $env:RELEASE_TAG win-capture-windows-x64.zip --target $env:GITHUB_SHA --title $env:RELEASE_TAG --notes "Windows preview build. See README.md for current features and limitations." --prerelease
