@@ -13,6 +13,7 @@
 
 ### docs/
 - docs/ ドキュメント
+- 設計の正本は `docs/design.md` とし、変更履歴はGitで管理する。文書が参照しづらい大きさになった場合は分割を提案できるが、`docs/design/` への分割はユーザーの承認後に行う。
 - docs/feature/ 機能ドキュメント。新規機能を追加するときは、featureを採番してから実装する。
 - docs/ADR/ ADRドキュメント。採番する。
 - docs/issue/ バグトラッカー。GitHub Issuesは使わず、`docs/issues/` に採番して修正を進める。
