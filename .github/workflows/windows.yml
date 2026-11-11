@@ -22,6 +22,8 @@ jobs:
         run: cmake -S . -B build -A x64 -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded
       - name: Build
         run: cmake --build build --config Release --parallel
+      - name: Smoke test MP4 recording
+        run: ./build/Release/recording_smoke.exe
       - name: Package
         shell: pwsh
         run: |
